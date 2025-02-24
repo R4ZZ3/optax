@@ -105,80 +105,87 @@ def scale_by_muon(
         tuple[tuple[float, float, float], ...],
     ] = (3.4445, -4.7750, 2.0315),
     ns_steps: int = 5,
-    beta: float = 0.95,
-    eps: float = 1e-8,
-    mu_dtype: Optional[chex.ArrayDType] = None,
-    *,
+    momentum: float = 0.95,
     nesterov: bool = True,
+    weight_decay: float = 0.1,
     adaptive: bool = False,
+    eps: float = 1e-8,
 ) -> base.GradientTransformation:
-  r"""Rescale updates according to the Muon algorithm.
+  """Scale updates using the Muon optimizer.
 
-  Muon is a variant of Shampoo that uses the Newton-schulz method to
-  orthogonalize the momentum accumulated by the optimizer. Mathematically, it
-  does steepest descent under the Schatten-p norm, for some large p. With
-  p=infty, it is equivalent to Shampoo without accumulation, or steepest
-  descent under the Spectral norm.
+  Muon (MomentUm Orthogonalized by Newton-schulz) internally runs standard
+  SGD-momentum, and then performs an orthogonalization post-processing step,
+  in which each 2D parameter's update is replaced with the nearest orthogonal
+  matrix. To efficiently orthogonalize each update, we use a Newton-Schulz
+  iteration.
+
+  References:
+    [Muon optimizer](https://github.com/KellerJordan/modded-nanogpt)
+    by Keller Jordan
 
   Args:
-    ns_coeffs: Coefficients for the Newton-schulz method.
+    ns_coeffs: Coefficients for the Newton-schulz iterators.
+      Must have shape (3,) or (n, 3) where n is the number of iterations.
     ns_steps: Number of Newton-schulz iterations.
-      Ignored if `ns_coeffs` is a tuple of tuples.
-    beta: Decay rate for the exponentially weighted average of grads.
-    eps: Term added to denominators to improve numerical stability.
-    mu_dtype: Data type of the momentum accumulator.
+      Ignored if `ns_coeffs` is a 2D array.
+    momentum: Momentum parameter.
     nesterov: Whether to use Nesterov momentum.
-    adaptive: Whether to scale the updates by the dual norm of the
-      original updates. See <https://arxiv.org/abs/2409.20325>
+    weight_decay: Weight decay parameter.
+    adaptive: Whether to scale updates by the dual norm.
+    eps: Term added to denominators to improve numerical stability.
 
   Returns:
     A `GradientTransformation` object.
-
-  References:
-    Jordan, `modded-nanogpt: Speedrunning the NanoGPT baseline
-    <https://github.com/KellerJordan/modded-nanogpt>`_, 2024
-
-    Bernstein et al., `Old Optimizer, New Norm: An Anthology
-    <https://arxiv.org/abs/2409.20325>`_, 2024
   """
-  mu_dtype = utils.canonicalize_dtype(mu_dtype)
-  ns_coeffs_ = jnp.asarray(ns_coeffs)
-  if ns_coeffs_.ndim > 2 or ns_coeffs_.shape[-1] != 3:
-    raise ValueError(
-        f'ns_coeffs must have shape (3,) or (n, 3), got {ns_coeffs_.shape}'
-    )
-
   def init_fn(params):
-    mu = otu.tree_zeros_like(params, dtype=mu_dtype)  # First moment
-    return MuonState(count=jnp.zeros([], jnp.int32), mu=mu)
+    return MuonState(count=jnp.zeros([], jnp.int32), mu=otu.tree_zeros_like(params))
 
   def update_fn(updates, state, params=None):
-    del params
-    mu = otu.tree_update_moment(updates, state.mu, beta, 1)
-    count_inc = numerics.safe_increment(state.count)
+    if params is None:
+      raise ValueError(NO_PARAMS_MSG)
+
+    # Apply momentum
+    mu = otu.tree_mul(state.mu, momentum)
+    mu = otu.tree_add(mu, updates)
+    
     if nesterov:
-      mu_hat = jax.tree.map(
-          lambda m, g: beta * m + (1 - beta) * g,
-          otu.tree_bias_correction(
-              mu, beta, numerics.safe_increment(count_inc)
-          ),
-          otu.tree_bias_correction(updates, beta, count_inc),
-      )
+      updates_with_momentum = otu.tree_add(updates, otu.tree_mul(mu, momentum))
     else:
-      mu_hat = otu.tree_bias_correction(mu, beta, count_inc)
-    # Apply Newton-schulz orthogonalization.
-    updates = jax.tree.map(
-        lambda x: orthogonalize_via_newton_schulz(x, ns_coeffs_, ns_steps, eps),
-        mu_hat,
-    )
+      updates_with_momentum = mu
+
+    # Apply weight decay
+    if weight_decay > 0:
+      params = otu.tree_scalar_mul(1 - weight_decay, params)
+
+    # Process updates
+    def process_param_update(update, param):
+      if update.ndim != 2:
+        return update
+      
+      # Adjust learning rate based on matrix dimensions
+      A, B = param.shape
+      adjusted_ratio = 0.2 * jnp.sqrt(jnp.maximum(A, B))
+      
+      # Orthogonalize via Newton-Schulz
+      orthogonalized = orthogonalize_via_newton_schulz(
+          update, ns_coeffs, ns_steps, eps)
+      
+      # Scale by adjusted learning rate
+      return orthogonalized * adjusted_ratio
+
+    # Apply orthogonalization to 2D parameters only
+    processed_updates = jax.tree.map(
+        process_param_update, updates_with_momentum, params)
+
+    # Scale by dual norm if adaptive
     if adaptive:
-      # Scale the orthogonalized updates by the dual norm of the original
-      # updates. See https://arxiv.org/abs/2409.20325 for the derivation.
-      updates = jax.tree.map(
-          lambda x, y: jnp.einsum('ij,ij,ab->ab', x, y, y), mu_hat, updates
-      )
-    mu = otu.tree_cast(mu, mu_dtype)
-    return updates, MuonState(count=count_inc, mu=mu)
+      updates_norm = otu.tree_l2_norm(processed_updates)
+      processed_updates = jax.tree.map(
+          lambda u: u / (updates_norm + eps), processed_updates)
+
+    return processed_updates, MuonState(
+        count=numerics.safe_int32_increment(state.count), mu=mu)
+
   return base.GradientTransformation(init_fn, update_fn)
 
 
