@@ -100,8 +100,8 @@ def splus(
   """
 
   def init_fn(params):
-    momentum = otu.tree_zeros_like(params)
-    ema = otu.tree_zeros_like(params)
+    momentum = jax.tree_map(jnp.zeros_like, params)
+    ema = jax.tree_map(jnp.zeros_like, params)
 
     def sides_decomp(p):
       if len(p.shape) == 2:
