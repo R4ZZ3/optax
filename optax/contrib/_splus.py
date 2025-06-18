@@ -49,7 +49,7 @@ def splus_get_eval_params(state: SPlusState) -> chex.Array:
   Returns:
     The parameters for evaluation (the EMA of the parameters).
   """
-  ema_hat = jax.tree_map(
+  ema_hat = jax.tree_util.tree_map(
       lambda e: e / (1 - state.ema_rate**state.step), state.ema
   )
   return ema_hat
@@ -177,14 +177,14 @@ def splus(
       )
 
     # Rotate to eigenbasis, take sign, unrotate.
-    momentum = jax.tree_map(
+    momentum = jax.tree_util.tree_map(
         lambda m, g: b1 * m + (1 - b1) * g, state.momentum, grads
     )
-    momentum_rot = jax.tree_map(rot, momentum, state.q_sides)
-    updates_rot = jax.tree_map(jnp.sign, momentum_rot)
-    updates = jax.tree_map(unrot, updates_rot, state.q_sides)
-    sides = jax.tree_map(update_sides, grads, state.sides)
-    ema = jax.tree_map(
+    momentum_rot = jax.tree_util.tree_map(rot, momentum, state.q_sides)
+    updates_rot = jax.tree_util.tree_map(jnp.sign, momentum_rot)
+    updates = jax.tree_util.tree_map(unrot, updates_rot, state.q_sides)
+    sides = jax.tree_util.tree_map(update_sides, grads, state.sides)
+    ema = jax.tree_util.tree_map(
         lambda e, p: ema_rate * e + (1 - ema_rate) * p, state.ema, params
     )
 
