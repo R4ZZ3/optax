@@ -100,22 +100,22 @@ def splus(
   """
 
   def init_fn(params):
-    momentum = jax.tree_map(jnp.zeros_like, params)
-    ema = jax.tree_map(jnp.zeros_like, params)
+    momentum = jax.tree_util.tree_map(jnp.zeros_like, params)
+    ema = jax.tree_util.tree_map(jnp.zeros_like, params)
 
     def sides_decomp(p):
       if len(p.shape) == 2:
         return [jnp.zeros((d, d)) if d < max_dim else None for d in p.shape]
       return None
 
-    sides = jax.tree_map(sides_decomp, params)
+    sides = jax.tree_util.tree_map(sides_decomp, params)
 
     def qs_decomp(p):
       if len(p.shape) == 2:
         return [jnp.eye(d) if d < max_dim else None for d in p.shape]
       return None
 
-    q_sides = jax.tree_map(qs_decomp, params)
+    q_sides = jax.tree_util.tree_map(qs_decomp, params)
     step = jnp.zeros([], jnp.int32)
     return SPlusState(ema, momentum, sides, q_sides, step, ema_rate)
 
@@ -158,10 +158,10 @@ def splus(
         return jax.device_put(p, devices[idx])
 
       sides = jax.experimental.multihost_utils.process_allgather(sides)
-      sides = jax.tree_map(put_device_staggered, sides)
-    q_sides = jax.tree_map(get_eigvecs, sides)
+      sides = jax.tree_util.tree_map(put_device_staggered, sides)
+    q_sides = jax.tree_util.tree_map(get_eigvecs, sides)
     if jit_broadcast_computation:
-      q_sides = jax.tree_map(lambda _, x: jax.device_get(x), sides, q_sides)
+      q_sides = jax.tree_util.tree_map(lambda _, x: jax.device_get(x), sides, q_sides)
       if jit_original_sharding is not None:
         q_sides = jax.jit(
             lambda x: x, out_shardings=jit_original_sharding.q_sides
